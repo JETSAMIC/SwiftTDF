@@ -1,71 +1,90 @@
 // TDFParser.swift
 // SwiftTDF — decode raw .tdf bytes into a ``TDFFontCollection``.
 //
-// See Reference/TDF_SPECIFICATION.md for the authoritative format reference.
-// Reads liberally (accepts anything TDFONTS.EXE would have produced) and
-// surfaces all positional context through ``TDFError`` so callers can point
-// at the offending byte without re-walking the file.
+// See Reference/TDF_SPECIFICATION.md for the format reference. Reads
+// liberally (accepts anything TDFONTS.EXE would have produced, plus the
+// common variants written by other tools) and treats every offset and size
+// in the file as untrusted.
 
 import Foundation
 
 /// Stateless decoder for the TheDraw `.tdf` binary container.
 ///
-/// The decoder is intentionally namespaced as an empty `enum` — every call
-/// site is a `TDFParser.parse(_:)` invocation that fully consumes its input.
-/// Internal helpers are private file-scope; there is no public state to
-/// configure or share between calls.
+/// The decoder is namespaced as an empty `enum`: every call site is a
+/// ``parse(_:)`` invocation that fully consumes its input. There is no state
+/// to configure or share between calls, so it is safe to call concurrently.
+///
+/// ## Robustness
+///
+/// Every offset, size and length in a `.tdf` file is treated as untrusted.
+/// The parser never reads outside the input, never traps on arithmetic,
+/// and bounds the work done per glyph (see ``maxCellsPerGlyph``), so any
+/// input either decodes or throws a ``TDFError``.
 public enum TDFParser {
-    /// Decode a `.tdf` file into a ``TDFFontCollection``.
+    /// Maximum number of cells the decoder accepts on a single glyph line.
+    /// TheDraw caps glyph width at 30; anything above this limit is treated
+    /// as corrupt input and reported as ``TDFError/glyphTooLarge(font:ascii:)``.
+    public static let maxCellsPerLine = 255
+    /// Maximum number of lines (including descender lines) the decoder
+    /// accepts in a single glyph. TheDraw caps glyph height at 12.
+    public static let maxLinesPerGlyph = 255
+    /// Maximum total number of cells the decoder accepts in a single glyph.
+    /// This bounds memory use on hostile input whose offset table points
+    /// many glyphs into one large unterminated run of data.
+    public static let maxCellsPerGlyph = 4_096
+
+    /// Decodes a `.tdf` file into a ``TDFFontCollection``.
     ///
-    /// The parser bounds-checks every read and throws ``TDFError`` on the
-    /// first failure that can't be locally recovered. It will, however,
-    /// continue past the spec's 34-font cap and report the count via
-    /// ``TDFError/tooManyFonts(count:)`` only after walking the whole
-    /// collection — callers that want partial recovery can catch this
-    /// error and re-run the parser themselves with a trimmed buffer.
+    /// Fonts are read back to back: each font header is followed by exactly
+    /// `blockSize` bytes of character data, and the next font header (if
+    /// any) starts immediately after. At a font boundary the parser stops
+    /// on end of input, on a `0x00` font-list terminator, or on a `0x1A`
+    /// DOS EOF byte (which introduces a trailing SAUCE record in many
+    /// distributed files). A stray `0x00` immediately followed by another
+    /// font sentinel is skipped, so files that place a separator outside the
+    /// block size are also accepted.
+    ///
+    /// The canonical empty file written by ``TDFWriter/encode(_:)`` (a single
+    /// nameless block font with no glyphs) and a bare 20-byte file header
+    /// both decode to ``TDFFontCollection/empty``.
+    ///
+    /// - Parameter data: The complete contents of a `.tdf` file. May be a
+    ///   slice with a non-zero `startIndex`.
+    /// - Returns: The decoded collection, fonts in file order.
+    /// - Throws: ``TDFError`` describing the first malformation found. The
+    ///   parser stops with ``TDFError/tooManyFonts(count:)`` as soon as it
+    ///   meets a 35th font header.
     public static func parse(_ data: Data) throws -> TDFFontCollection {
-        var cursor = Cursor(data: data)
+        let bytes = [UInt8](data)
+        var cursor = Cursor(bytes: bytes)
         try validateFileHeader(&cursor)
 
         var fonts: [TDFFont] = []
 
-        // The very first font's sentinel must be present immediately after
-        // the 20-byte file header. Subsequent fonts are NUL-separated; the
-        // separator is consumed at the bottom of the loop iff there is more
-        // data left after the current font.
         while cursor.remaining > 0 {
-            let fontIndex = fonts.count
-            let font = try readFont(&cursor, fontIndex: fontIndex)
-            fonts.append(font)
-
-            // Spec: fonts are NUL-separated EXCEPT the last font. If there's
-            // any data left, the next byte should be the 0x00 separator and
-            // then the next font's sentinel. Tolerate a stray trailing NUL
-            // after the last font too — some writers emit one.
-            if cursor.remaining > 0 {
-                let separator = try cursor.readUInt8()
-                // A NUL separator is the only valid continuation; if the
-                // following byte starts the sentinel directly (because the
-                // separator was actually a content byte misclassified by an
-                // older writer), let the next iteration's sentinel check
-                // produce a precise error.
-                if separator != 0x00 && cursor.remaining > 0 {
-                    // Rewind so the sentinel check sees this byte.
-                    cursor.position -= 1
+            // Font-list boundary handling.
+            let next = bytes[cursor.position]
+            if next == 0x1A {
+                break  // DOS EOF; usually followed by a SAUCE record.
+            }
+            if next == 0x00 {
+                if cursor.hasSentinel(at: cursor.position + 1) {
+                    cursor.position += 1  // legacy separator outside the block
+                } else {
+                    break  // font-list terminator
                 }
             }
-        }
 
-        if fonts.count > TDFFontCollection.maxFontsPerCollection {
-            throw TDFError.tooManyFonts(count: fonts.count)
+            guard fonts.count < TDFFontCollection.maxFontsPerCollection else {
+                throw TDFError.tooManyFonts(count: fonts.count + 1)
+            }
+            fonts.append(try readFont(&cursor, fontIndex: fonts.count))
         }
 
         // Empty-collection round-trip: the writer synthesizes a placeholder
         // font (empty name, block type, no glyphs) for empty collections so
         // the output is still a structurally valid TDFONTS.EXE file. Reverse
-        // that here so `parse(encode(.empty)) == .empty` — without this the
-        // round-trip would yield a 1-font collection containing the
-        // placeholder.
+        // that here so `parse(encode(.empty)) == .empty`.
         if fonts.count == 1, isEmptyPlaceholder(fonts[0]) {
             return TDFFontCollection.empty
         }
@@ -74,11 +93,9 @@ public enum TDFParser {
     }
 
     /// True for the writer's synthesized "empty collection" placeholder
-    /// font: zero-length name, block type, no defined glyphs, default
-    /// letter spacing. Matched here so the parser can reduce the canonical
-    /// empty-file encoding back to ``TDFFontCollection/empty``.
+    /// font: zero-length name, block type, no defined glyphs, zero spacing.
     private static func isEmptyPlaceholder(_ font: TDFFont) -> Bool {
-        return font.name.isEmpty
+        font.name.isEmpty
             && font.type == .block
             && font.letterSpacing == 0
             && font.characters.isEmpty
@@ -90,8 +107,8 @@ public enum TDFParser {
         guard cursor.remaining >= TDFFontCollection.fileHeaderSize else {
             throw TDFError.fileTooShort
         }
-        let header = try cursor.readBytes(TDFFontCollection.fileHeaderSize)
-        if Array(header) != TDFFontCollection.fileSignature {
+        let header = cursor.take(TDFFontCollection.fileHeaderSize)
+        if !header.elementsEqual(TDFFontCollection.fileSignature) {
             throw TDFError.invalidSignature
         }
     }
@@ -101,91 +118,78 @@ public enum TDFParser {
     private static func readFont(_ cursor: inout Cursor, fontIndex: Int) throws -> TDFFont {
         // (a) sentinel
         let sentinelOffset = cursor.position
-        guard cursor.remaining >= 4 else {
-            throw TDFError.invalidFontSentinel(at: sentinelOffset)
-        }
-        let sentinel = try cursor.readBytes(4)
-        if Array(sentinel) != TDFFontCollection.fontStartSentinel {
+        guard cursor.hasSentinel(at: sentinelOffset) else {
             throw TDFError.invalidFontSentinel(at: sentinelOffset)
         }
 
-        // (b) name length + 12-byte name buffer
-        guard cursor.remaining >= 1 + 12 else {
+        // The remainder of the 213-byte header must be present in full.
+        guard cursor.remaining >= TDFFontCollection.fontHeaderSize else {
             throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
         }
-        let rawNameLength = try cursor.readUInt8()
-        let nameLength = min(Int(rawNameLength), 12)
-        let nameBuffer = try cursor.readBytes(12)
-        let name = decodeFontName(Array(nameBuffer.prefix(nameLength)))
+        cursor.position += TDFFontCollection.fontStartSentinel.count
+
+        // (b) name length + 12-byte name buffer. Lengths above 12 are
+        // clamped; bytes past the declared length are undefined padding.
+        let nameLength = min(Int(cursor.readUInt8()), 12)
+        let nameBuffer = cursor.take(12)
+        let name = decodeFontName(nameBuffer.prefix(nameLength))
 
         // (c) 4 reserved bytes
-        guard cursor.remaining >= 4 else {
-            throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
-        }
-        _ = try cursor.readBytes(4)
+        cursor.position += 4
 
         // (d) font type
-        guard cursor.remaining >= 1 else {
-            throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
-        }
-        let typeByte = try cursor.readUInt8()
+        let typeByte = cursor.readUInt8()
         guard let fontType = TDFFontType(rawValue: typeByte) else {
             throw TDFError.invalidFontType(typeByte)
         }
 
-        // (e) letter spacing; on-disk range 0x01..0x29 → in-memory 0..40
-        guard cursor.remaining >= 1 else {
-            throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
-        }
-        let spacingByte = try cursor.readUInt8()
-        guard spacingByte >= 0x01 && spacingByte <= 0x29 else {
+        // (e) letter spacing; on-disk 0x01...0x29 → in-memory 0...40. A
+        // 0x00 byte is accepted leniently as zero spacing.
+        let spacingByte = cursor.readUInt8()
+        guard spacingByte <= 0x29 else {
             throw TDFError.invalidLetterSpacing(spacingByte)
         }
-        let letterSpacing = spacingByte - 1
+        let letterSpacing = spacingByte == 0 ? 0 : spacingByte - 1
 
         // (f) block size (LE UInt16)
-        guard cursor.remaining >= 2 else {
-            throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
-        }
-        let blockSize = Int(try cursor.readUInt16LE())
+        let blockSize = Int(cursor.readUInt16LE())
 
         // (g) 94 × UInt16 LE offsets, 188 bytes total
-        guard cursor.remaining >= 188 else {
-            throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
-        }
         var offsets: [UInt16] = []
-        offsets.reserveCapacity(94)
-        for _ in 0..<94 {
-            offsets.append(try cursor.readUInt16LE())
+        offsets.reserveCapacity(TDFFont.glyphCount)
+        for _ in 0..<TDFFont.glyphCount {
+            offsets.append(cursor.readUInt16LE())
         }
 
-        // (h) character-data block: blockSize bytes following the offset table.
-        // We snapshot the block into a flat [UInt8] so glyph decoding can
-        // index by `0..<blockSize` without worrying about Data's startIndex
-        // offset (the input may be a slice).
+        // (h) character-data block
         guard cursor.remaining >= blockSize else {
             throw TDFError.characterDataTruncated(font: fontIndex, ascii: 0)
         }
-        let blockBytes = try cursor.readBytes(blockSize)
+        let block = cursor.take(blockSize)
 
-        // (i) decode each defined glyph
+        // (i) decode each defined glyph. Glyphs that share an offset (the
+        // editor's "Copy character") are decoded once.
         var characters: [UInt8: TDFCharacter] = [:]
+        var decodedByOffset: [Int: TDFCharacter] = [:]
         let asciiStart = TDFFont.definedASCIIRange.lowerBound
-        for (i, glyphOffset) in offsets.enumerated() {
-            guard glyphOffset != 0xFFFF else { continue }
-            let ascii = UInt8(Int(asciiStart) + i)
-            let glyphStart = Int(glyphOffset)
-            // Need at least the 2-byte glyph header.
-            guard glyphStart + 2 <= blockBytes.count else {
-                throw TDFError.characterDataTruncated(font: fontIndex, ascii: ascii)
+        for (index, rawOffset) in offsets.enumerated() where rawOffset != 0xFFFF {
+            let ascii = asciiStart + UInt8(index)
+            let glyphStart = Int(rawOffset)
+            if let cached = decodedByOffset[glyphStart] {
+                characters[ascii] = cached
+                continue
+            }
+            guard glyphStart < block.count else {
+                throw TDFError.glyphOffsetOutOfRange(font: fontIndex, ascii: ascii, offset: glyphStart)
             }
             let glyph = try decodeGlyph(
-                in: blockBytes,
+                in: block,
                 glyphStart: glyphStart,
                 fontType: fontType,
                 fontIndex: fontIndex,
                 ascii: ascii
             )
+            decodedByOffset[glyphStart] = glyph
             characters[ascii] = glyph
         }
 
@@ -199,6 +203,23 @@ public enum TDFParser {
 
     // MARK: - Glyph
 
+    /// Decodes one glyph starting at `glyphStart` inside `block`.
+    ///
+    /// The loop top is always at a *cell boundary*. There, three bytes are
+    /// control codes in every font type and are consumed as single bytes:
+    ///
+    /// - `0x00` ends the glyph. TDFONTS.EXE writes it directly after the
+    ///   last cell (no trailing CR); a `0x0D 0x00` sequence is equally
+    ///   accepted. A `0x00` *attribute* byte is never at a cell boundary,
+    ///   so it cannot be mistaken for the terminator.
+    /// - `0x0D` ends the current line.
+    /// - `0x26` (`&`) is a marker, not content. In color fonts it carries
+    ///   **no** attribute byte. When it is the last cell of a line the line
+    ///   is a descender (``TDFLine/isDescender``); elsewhere it is kept as
+    ///   a ``TDFCell`` with code `0x26` and no attribute so it round-trips.
+    ///
+    /// Any other byte starts a cell: one byte for block/outline fonts, a
+    /// character byte plus an attribute byte for color fonts.
     private static func decodeGlyph(
         in block: [UInt8],
         glyphStart: Int,
@@ -206,8 +227,9 @@ public enum TDFParser {
         fontIndex: Int,
         ascii: UInt8
     ) throws -> TDFCharacter {
-        // Glyph header: 2 bytes (max width, max height). Already bounds-
-        // checked by the caller.
+        guard glyphStart + 2 <= block.count else {
+            throw TDFError.characterDataTruncated(font: fontIndex, ascii: ascii)
+        }
         let maxWidth = block[glyphStart]
         let maxHeight = block[glyphStart + 1]
 
@@ -215,88 +237,68 @@ public enum TDFParser {
         let blockEnd = block.count
         var lines: [TDFLine] = []
         var currentCells: [TDFCell] = []
+        var totalCells = 0
 
-        // The loop top is always at a CELL BOUNDARY (or right after a CR
-        // line break). At a cell boundary, a 0x00 byte is the glyph
-        // terminator — period. The Roy/SAC spec phrases this as "NUL after
-        // 0x0D", but TDFONTS.EXE in practice emits the terminator at the
-        // end of the last cell's data with NO trailing CR (observed in the
-        // canonical TDFONTS.TDF "ColorRounded" font and others). Requiring
-        // a preceding CR makes the parser walk straight past the real
-        // terminator, mis-stride color cells, and eventually trip the
-        // mid-cell bounds check on the first glyph of every such font.
-        //
-        // 0x00 cannot be confused with cell content here:
-        //   - For block/outline fonts CP437 0x00 is not a drawable code.
-        //   - For color fonts the cell's CHARACTER byte is at the cell
-        //     boundary; a 0x00 there would also be a non-drawable NUL char.
-        //     The legitimate "0x00 is a legal attribute" case in the spec
-        //     refers to the SECOND byte of a color cell, which is consumed
-        //     inside the .color switch arm below and never re-enters this
-        //     check.
+        func appendCell(_ cell: TDFCell) throws {
+            totalCells += 1
+            guard currentCells.count < maxCellsPerLine, totalCells <= maxCellsPerGlyph else {
+                throw TDFError.glyphTooLarge(font: fontIndex, ascii: ascii)
+            }
+            currentCells.append(cell)
+        }
+
         while position < blockEnd {
             let byte = block[position]
 
-            if byte == 0x00 {
-                position += 1
-                return finalize(
-                    maxWidth: maxWidth,
-                    maxHeight: maxHeight,
-                    lines: &lines,
-                    currentCells: &currentCells
-                )
-            }
-
-            if byte == 0x0D {
-                // Line break: append the line we built, mark descender if
-                // the last cell was `&` (0x26).
-                appendLine(
-                    cells: &currentCells,
-                    into: &lines
-                )
-                position += 1
-                continue
-            }
-
-            // Otherwise: this byte starts a cell.
-            switch fontType {
-            case .block, .outline:
-                currentCells.append(TDFCell(code: byte, attribute: nil))
-                position += 1
-            case .color:
-                // Color cells are 2 bytes; the second byte is the attribute
-                // and 0x00 there is legal (black on black). If the buffer
-                // ends mid-cell, treat as truncation.
-                guard position + 1 < blockEnd else {
-                    throw TDFError.characterDataTruncated(font: fontIndex, ascii: ascii)
+            switch byte {
+            case 0x00:
+                if !currentCells.isEmpty {
+                    appendLine(cells: &currentCells, into: &lines)
                 }
-                let attributeByte = block[position + 1]
-                currentCells.append(
-                    TDFCell(code: byte, attribute: TDFAttribute(rawByte: attributeByte))
-                )
-                position += 2
+                return TDFCharacter(maxWidth: maxWidth, maxHeight: maxHeight, lines: lines)
+
+            case 0x0D:
+                guard lines.count < maxLinesPerGlyph else {
+                    throw TDFError.glyphTooLarge(font: fontIndex, ascii: ascii)
+                }
+                appendLine(cells: &currentCells, into: &lines)
+                position += 1
+
+            case TDFCell.markerCode:
+                try appendCell(TDFCell(code: byte, attribute: nil))
+                position += 1
+
+            default:
+                switch fontType {
+                case .block, .outline:
+                    try appendCell(TDFCell(code: byte, attribute: nil))
+                    position += 1
+                case .color:
+                    guard position + 1 < blockEnd else {
+                        throw TDFError.characterDataTruncated(font: fontIndex, ascii: ascii)
+                    }
+                    let attribute = TDFAttribute(rawByte: block[position + 1])
+                    try appendCell(TDFCell(code: byte, attribute: attribute))
+                    position += 2
+                }
             }
         }
 
-        // Ran out of buffer without a proper NUL terminator. The spec is
-        // tolerant here — finalize whatever we have. This handles the case
-        // where the writer omitted a terminator for the last glyph of a
-        // block.
-        return finalize(
-            maxWidth: maxWidth,
-            maxHeight: maxHeight,
-            lines: &lines,
-            currentCells: &currentCells
-        )
+        // Ran off the end of the block without a terminator. TDFONTS.EXE
+        // always terminates, but other writers sometimes omit the final
+        // NUL; keep what was decoded.
+        if !currentCells.isEmpty {
+            appendLine(cells: &currentCells, into: &lines)
+        }
+        return TDFCharacter(maxWidth: maxWidth, maxHeight: maxHeight, lines: lines)
     }
 
-    /// Append the current line to `lines`, applying the `&` descender rule.
-    /// Per the spec, a line whose final cell is the literal `&` byte (0x26)
-    /// is a descender line: the `&` is a marker, not content, so we drop it
-    /// from the cells and flag the line.
+    /// Appends the current line to `lines`, applying the `&` descender rule:
+    /// a line whose final cell is the `&` marker is a descender line; the
+    /// marker itself is dropped from the cells and recorded in the flag.
     private static func appendLine(cells: inout [TDFCell], into lines: inout [TDFLine]) {
         var line = TDFLine(cells: cells, isDescender: false)
-        if let last = cells.last, last.code == 0x26 {
+        if let last = cells.last, last.code == TDFCell.markerCode {
             line.cells.removeLast()
             line.isDescender = true
         }
@@ -304,78 +306,53 @@ public enum TDFParser {
         cells.removeAll(keepingCapacity: true)
     }
 
-    /// Finalize a glyph: emit any trailing partial line and build the
-    /// ``TDFCharacter``.
-    private static func finalize(
-        maxWidth: UInt8,
-        maxHeight: UInt8,
-        lines: inout [TDFLine],
-        currentCells: inout [TDFCell]
-    ) -> TDFCharacter {
-        if !currentCells.isEmpty {
-            appendLine(cells: &currentCells, into: &lines)
-        }
-        return TDFCharacter(maxWidth: maxWidth, maxHeight: maxHeight, lines: lines)
-    }
-
     // MARK: - Name decoding
 
-    /// Decode the first `L` bytes of a font name as ASCII, dropping NULs and
-    /// non-printable bytes. The spec calls the name "ASCII"; in practice the
-    /// 12-byte buffer is often padded with junk past the declared length.
-    private static func decodeFontName(_ bytes: [UInt8]) -> String {
+    /// Decodes the first `L` bytes of a font name as ASCII, dropping NULs and
+    /// non-printable bytes. In practice the 12-byte buffer is often padded
+    /// with junk past the declared length, and some files NUL-pad inside it.
+    private static func decodeFontName(_ bytes: ArraySlice<UInt8>) -> String {
         let filtered = bytes.filter { $0 >= 0x20 && $0 <= 0x7E }
         return String(decoding: filtered, as: UTF8.self)
     }
-
 }
 
 // MARK: - Cursor
 
-/// Linear bounds-checked cursor over a `Data` buffer. Throws on any read
-/// past the end and surfaces the absolute byte position so the parser can
-/// report precise offsets in errors.
+/// Linear cursor over a zero-based byte array. Callers check `remaining`
+/// before every unchecked read; the helpers below never trap as long as
+/// that contract holds.
 private struct Cursor {
-    let data: Data
-    /// Absolute byte position. Note `Data` may start at a non-zero
-    /// `startIndex` when sliced; we normalize indexing through `byte(at:)`.
+    let bytes: [UInt8]
     var position: Int = 0
 
-    var remaining: Int { data.count - position }
-
-    func byte(at index: Int) -> UInt8 {
-        // Data indexing is offset-from-startIndex; this mirrors that.
-        return data[data.startIndex + index]
+    init(bytes: [UInt8]) {
+        self.bytes = bytes
     }
 
-    mutating func readUInt8() throws -> UInt8 {
-        guard remaining >= 1 else {
-            throw TDFError.fileTooShort
-        }
-        let b = byte(at: position)
+    var remaining: Int { bytes.count - position }
+
+    func hasSentinel(at offset: Int) -> Bool {
+        let sentinel = TDFFontCollection.fontStartSentinel
+        guard offset >= 0, bytes.count - offset >= sentinel.count else { return false }
+        return bytes[offset..<(offset + sentinel.count)].elementsEqual(sentinel)
+    }
+
+    mutating func readUInt8() -> UInt8 {
+        let b = bytes[position]
         position += 1
         return b
     }
 
-    mutating func readUInt16LE() throws -> UInt16 {
-        guard remaining >= 2 else {
-            throw TDFError.fileTooShort
-        }
-        let lo = byte(at: position)
-        let hi = byte(at: position + 1)
+    mutating func readUInt16LE() -> UInt16 {
+        let lo = bytes[position]
+        let hi = bytes[position + 1]
         position += 2
         return UInt16(lo) | (UInt16(hi) << 8)
     }
 
-    mutating func readBytes(_ count: Int) throws -> [UInt8] {
-        guard remaining >= count else {
-            throw TDFError.fileTooShort
-        }
-        var out: [UInt8] = []
-        out.reserveCapacity(count)
-        for i in 0..<count {
-            out.append(byte(at: position + i))
-        }
+    mutating func take(_ count: Int) -> [UInt8] {
+        let out = Array(bytes[position..<(position + count)])
         position += count
         return out
     }
