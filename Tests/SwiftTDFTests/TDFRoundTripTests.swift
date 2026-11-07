@@ -157,7 +157,7 @@ final class TDFRoundTripTests: XCTestCase {
     private func assertCollectionsEquivalent(
         _ expected: TDFFontCollection,
         _ actual: TDFFontCollection,
-        file: StaticString = #file,
+        file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
         XCTAssertEqual(actual.fonts.count, expected.fonts.count,
