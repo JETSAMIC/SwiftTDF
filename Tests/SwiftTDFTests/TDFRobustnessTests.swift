@@ -95,6 +95,9 @@ final class TDFRobustnessTests: XCTestCase {
             }
         }
         XCTAssertEqual(painted, 4)
+        let style = TDFOutlineStyle(index: 15)!
+        let rows = TDFRenderer.render(glyph, type: .outline, outlineStyle: style)
+        XCTAssertEqual(rows.count, 2)
         let bytes = try TDFWriter.encode(collection)
         XCTAssertEqual(bytes, data)
     }

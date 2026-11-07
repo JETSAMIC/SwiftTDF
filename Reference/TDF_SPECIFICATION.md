@@ -1,146 +1,227 @@
 # TheDraw Font (.TDF) File Format Specification
 
-> Source: Roy/SAC, "TheDraw Fonts File (.TDF) Specifications", 2014-04-23,
+> Primary source: Roy/SAC (Carsten Cumbrowski), "TheDraw Fonts File (.TDF)
+> Specifications", 2014-04-23,
 > https://www.roysac.com/blog/2014/04/thedraw-fonts-file-tdf-specifications/
+>
+> Cross-checked against the JETSAMIC org spec (`specs/art/tdf.md`) and the
+> de-facto reader/renderer in Mike Krüger's icy_tools / `retrofont` crate,
+> whose outline-style table is taken from TheDraw itself.
 
-This is a reverse-engineered specification of the .TDF binary container used by TheDraw (an MS-DOS ANSI/ASCII text editor) for its fonts. It is not an official Apple-style spec — it was deduced empirically by Roy/SAC by inspecting actual font files and the TDFONTS.EXE editor's output. SwiftTDF treats this document as authoritative.
+TheDraw was the dominant MS-DOS ANSI/ASCII editor of the early 1990s. A
+`.TDF` file is a **collection** of fonts. No official specification exists;
+everything below was reverse-engineered. Where Roy/SAC's write-up contradicts
+itself or de-facto behaviour, this document says so explicitly (see
+[Errata](#errata-against-the-roysac-write-up)).
 
-## File container
+All multi-byte values are little-endian.
 
-A .TDF file is a **collection** of up to **34 fonts**. An empty file is exactly **232 bytes**: a 20-byte file header followed by a 212-byte placeholder font header. Character data starts at offset 233 in single-font files.
+## File layout
 
-Files are little-endian throughout.
+```
+offset 0      file header                20 bytes
+offset 20     font 1 header              213 bytes
+offset 233    font 1 character data      BlockSize(1) bytes
+233+BS(1)     font 2 header              213 bytes
+...           font 2 character data      BlockSize(2) bytes
+...           (optional) 0x00 font-list terminator, SAUCE record, ...
+```
 
-### File header (offsets 0..19, fixed 20 bytes)
+A file holding one font with no glyphs is **233 bytes**.
 
-| Offset | Length | Value | Notes |
+### File header (20 bytes)
+
+| Offset | Size | Value | Notes |
 |---|---|---|---|
-| 0 | 1 | `0x13` | Magic. |
-| 1 | 18 | `"TheDraw FONTS file"` | ASCII signature. |
-| 19 | 1 | `0x1A` | CP/M EOF marker. |
+| 0 | 1 | `0x13` | Pascal-style length byte: 19 = the 18 signature characters + the EOF byte. |
+| 1 | 18 | `"TheDraw FONTS file"` | ASCII. |
+| 19 | 1 | `0x1A` | DOS EOF, so `TYPE FONT.TDF` stops here. |
 
-## Per-font header (212 bytes, repeated per font in the collection)
+### Font header (213 bytes, repeated per font)
 
-The first font's header begins at offset 20.
+| Rel. offset | Abs. (font 1) | Size | Field | Notes |
+|---|---|---|---|---|
+| 0 | 20 | 4 | Sentinel | `55 AA 00 FF` (the LE dword `0xFF00AA55`). |
+| 4 | 24 | 1 | NameLen | `1..12`. Readers clamp larger values to 12. |
+| 5 | 25 | 12 | Name | Only the first NameLen bytes are meaningful; the rest is NUL or garbage. |
+| 17 | 37 | 4 | Reserved | Observed as zero. |
+| 21 | 41 | 1 | FontType | `0x00` outline, `0x01` block, `0x02` color. |
+| 22 | 42 | 1 | Spacing | Letter spacing stored offset by one: `0x01..0x29` = 0..40 cells. |
+| 23 | 43 | 2 | BlockSize | Size in bytes of this font's character data (see below). |
+| 25 | 45 | 188 | Offsets | 94 words, one per glyph for ASCII 33 `!` … 126 `~`. Each is an offset from the start of this font's character data; `0xFFFF` = glyph undefined. |
 
-| Offset (relative) | Length | Description |
-|---|---|---|
-| 0 | 4 | `0x55 0xAA 0x00 0xFF` — start-of-font sentinel. |
-| 4 | 1 | Font name length `L` (`1..12`). |
-| 5 | 12 | Font name string; only first `L` bytes are meaningful, the rest may be NUL or garbage. |
-| 17 | 4 | Reserved; observed as zero. |
-| 21 | 1 | Font type — `0x00` outline, `0x01` block, `0x02` color. |
-| 22 | 1 | Letter spacing, `0x01..0x29` decimal-equivalent `0..40`. |
-| 23 | 2 | Block size (LE `UInt16`) — size in bytes of the character-data block that follows. |
-| 25 | 188 | 94 × 2-byte LE offsets, one per glyph for ASCII `'!'` (33) through `'~'` (126). `0xFFFF` means "glyph undefined". Any other value is an offset (from 0) into the character-data block where this glyph's data begins. |
+Space (32) and DEL (127) are never stored.
 
-### Subsequent fonts in a collection
+### Multiple fonts and the font-list terminator
 
-| Position | Computation |
-|---|---|
-| Font 1 header | offset 20 |
-| Font 1 data | offset 233 |
-| Font 2 header | (font 1 data end + 1 separator byte) |
-| Font 2 data | (font 2 header + 213 bytes) |
-| Font N data end | char data block end |
+Fonts are stored back to back: font *n+1*'s header starts exactly
+`BlockSize(n)` bytes after font *n*'s character data starts.
 
-Fonts in the collection are NUL-separated EXCEPT the last font, which is NOT NUL-terminated.
+```
+font_1_header = 20
+font_1_data   = 233
+font_n_header = font_(n-1)_data + BlockSize(n-1)
+font_n_data   = font_n_header + 213
+```
+
+Every font except the last ends its character data with one extra `0x00`,
+and that byte **is counted in its BlockSize**. The last font is not
+terminated this way. A `0x00` where a font header would begin therefore ends
+the font list; some tools (e.g. retrofont when writing bundles) append one
+after the last font. Distributed `.TDF` files frequently carry a SAUCE
+record after the last font, introduced by `0x1A`.
+
+The TDFONTS.EXE editor limits a collection to **34 fonts**; the format
+itself does not.
 
 ## Character data
 
-Each glyph entry begins with two header bytes:
+Each glyph starts with a two-byte header:
 
-| Offset | Length | Description |
-|---|---|---|
-| 0 | 1 | Max width, `1..30` (`0x1E`). |
-| 1 | 1 | Max height, `1..12` (`0x0C`). **Unreliable** when any line ends with `&` — those descender lines are not counted in the height. The header height is for *line-height/advance*, not for total height. Always read until the NUL terminator to determine actual character extent. |
-
-After the two header bytes, the glyph body begins. Encoding depends on font type:
-
-### Block fonts (type 0x01)
-Each cell is **1 byte** = the CP437 character code to draw at that cell, with default attributes.
-
-### Outline fonts (type 0x00)
-Each cell is **1 byte** = a "letter code" that represents a position in the outline (see Outline Glyph Mapping below). Letters `A..N` map to specific CP437 box-drawing characters; `O` is a hard space (`0xF7`); `@` is a filler for leading spaces; `&` is a descender mark.
-
-### Color fonts (type 0x02)
-Each cell is **2 bytes**:
-- Byte 1: CP437 character code.
-- Byte 2: attribute byte. Upper nibble (`(b >> 4) & 0x0F`) is the background color index, `0..7`. Lower nibble (`b & 0x0F`) is the foreground color index, `0..15`. **`0x00` is a legal attribute byte (black on black)** — do NOT mistake it for the NUL terminator; the terminator is distinguished by being a stand-alone byte after a 0x0D line break or at the end of the glyph.
-
-### Line terminator
-A `0x0D` byte (Carriage Return) ends the current line.
-
-### Glyph terminator
-A `0x00` (NUL) byte at any **cell boundary** ends the current glyph. The Roy/SAC spec phrases this as "NUL after 0x0D", but TDFONTS.EXE in practice writes the terminator at the end of the last cell of the last line with **no trailing CR**. The bare-NUL form is observed in the canonical TDFONTS.TDF distribution's `ColorRounded` font and is the norm for real-world color fonts; the CR-then-NUL form is also accepted (the CR closes the last line, then NUL terminates from the now-empty cell boundary). A parser must not require a preceding 0x0D to recognise the terminator.
-
-CP437 `0x00` is not a drawable character, so a bare NUL at a cell boundary is unambiguously the terminator — the spec's earlier warning about "0x00 is a legal attribute byte" refers to the SECOND byte of a color cell (the attribute), which is consumed inside the cell and never sits at a cell boundary.
-
-### Empty trailing cells
-If a line ends before reaching the max width, the remaining cells on that line are **transparent** (not rendered). This is normal — glyphs are not required to be rectangular.
-
-## Outline Glyph Mapping
-
-Outline fonts use single-letter codes to represent outline drawing characters. The mapping:
-
-| Letter | CP437 code (hex) | Glyph | Purpose |
+| Offset | Size | Field | Range |
 |---|---|---|---|
-| A | `0xCD` | ═ | Double horizontal beam |
-| B | `0xC4` | ─ | Single horizontal beam |
-| C | `0xB3` | │ | Single vertical beam |
-| D | `0xBA` | ║ | Double vertical beam |
-| E | `0xD5` | ╒ | Upper-left outer corner (outside) / Up-to-Right outer corner (inside) |
-| F | `0xBB` | ╗ | Upper-right outer corner (outside) / Right-to-Down outer corner (inside) |
-| G | `0xD6` | ╓ | Up-to-Right inner corner (outside) / Upper-left inner corner (inside) |
-| H | `0xBF` | ┐ | Right-to-Down inner corner (outside) / Upper-right inner corner (inside) |
-| I | `0xC8` | ╚ | Lower-left inner corner (inside) |
-| J | `0xBE` | ╛ | Lower-right inner corner (inside) |
-| K | `0xC0` | └ | Lower-left outer corner (outside) |
-| L | `0xBD` | ╜ | Lower-right outer corner (outside) |
-| M | `0xB5` | ╡ | (per spec — purpose unclear in source) |
-| N | `0xC7` | ╟ | (per spec — purpose unclear in source) |
-| O | `0xF7` | ≈ | Hard space (renders as a solid space cell inside the glyph) |
-| `@` | `0x40` | (filler) | Filler for leading spaces — not rendered as content |
-| `&` | `0x26` | (marker) | Descender mark — line is not counted by max-height |
+| 0 | 1 | MaxWidth | `1..30` |
+| 1 | 1 | MaxHeight | `1..12`, **excluding** descender lines (see `&`). Use it to advance the cursor, never to bound the read. |
 
-Outline-font drawing rules per Roy/SAC's documentation: double lines form the rightmost side of a column and the topmost side of a beam.
+The header is followed by a stream of cells. At every **cell boundary**
+three byte values are control codes in *all* font types and occupy a
+single byte:
 
-## Color table (16-color EGA, attribute byte indices)
-
-| Index | Color |
+| Byte | Meaning |
 |---|---|
-| 0 | Black |
-| 1 | Blue |
-| 2 | Green |
-| 3 | Cyan |
-| 4 | Red |
-| 5 | Magenta |
-| 6 | Brown |
-| 7 | Light Gray |
-| 8 | Dark Gray |
-| 9 | Bright Blue |
-| 10 | Bright Green |
-| 11 | Bright Cyan |
-| 12 | Bright Red |
-| 13 | Bright Magenta |
-| 14 | Yellow |
-| 15 | White |
+| `0x00` | End of glyph. TDFONTS.EXE writes it directly after the last cell (no trailing `0x0D`); `0x0D 0x00` is also seen and must be accepted. |
+| `0x0D` | End of line. |
+| `0x26` `&` | Marker. When it is the last cell of a line, the line is a *descender* (drawn, but not counted in MaxHeight). **In color fonts it has no attribute byte.** |
 
-Background indices are restricted to `0..7`; foreground may be `0..15`.
+Any other byte starts a cell:
 
-## Edge cases and gotchas
+| Font type | Cell encoding |
+|---|---|
+| Block (`0x01`) | 1 byte: CP437 character. |
+| Outline (`0x00`) | 1 byte: placeholder letter (see below) or literal character. |
+| Color (`0x02`) | 2 bytes: CP437 character, then a PC text-mode attribute byte. |
 
-- **Block-size overflow.** The 2-byte block-size field caps individual font character data at 65,534 bytes (0xFFFE; 0xFFFF is the "undefined offset" sentinel). For a color font using 2 bytes per cell + max 30×12 cells + line breaks + NUL per glyph for 94 glyphs, the maximum offset is reached well before glyph 93. Real-world large color fonts may need to share offsets via the "Copy character" feature.
-- **Copied glyphs share offset.** If two glyphs were created via TDFONTS.EXE's Copy command and neither was modified afterward, both will point to the same data offset. This is a legitimate space-saving technique and a writer should detect and emit identical offsets when two glyphs have byte-identical data.
-- **Outline reserved letters.** Outline fonts use specific letters for specific purposes; the file format does not enforce these rules — only the TDFONTS.EXE editor does. A library writing an outline font must validate the constraint itself or risk producing files that work but don't render correctly under the original rules.
-- **Hard spaces.** Outline glyph `O` (letter O, not zero) maps to CP437 `0xF7` and is used for the *interior* of solid columns/beams. Confusingly, in real-world rendering it is shown as ▓-style block in TDFONTS, not as the actual CP437 0xF7 character.
-- **Descender lines.** Lines terminated with `&` are below the baseline. They are part of the glyph but excluded from the line-height calculation so cursor positioning doesn't shift between letters with and without descenders.
+The color attribute byte is: bits 0–3 foreground (0–15), bits 4–6
+background (0–7), bit 7 blink (or bright background in iCE-color mode).
+`0x00` is a legal attribute (black on black); it never sits at a cell
+boundary, so it cannot be confused with the terminator.
+
+In block and color fonts `0xFF` is the *hard blank*: an opaque blank cell.
+
+If a line ends before MaxWidth, the remaining positions are transparent.
+
+Glyphs may share data: TDFONTS.EXE's *Copy character* points several
+offset-table entries at the same offset.
+
+## Outline fonts
+
+Outline glyphs store placeholder letters that are substituted at display
+time through one of **19 outline styles** the user selects in TheDraw.
+Placeholders `A`–`Q` index the style table; `O`, `P` and `Q` are blanks
+in every style.
+
+| Letter | Role (Roy/SAC) | Style 9 (Roy/SAC's table) |
+|---|---|---|
+| A | Horizontal beam, top (double in style 9) | `0xCD` ═ |
+| B | Horizontal beam (single in style 9) | `0xC4` ─ |
+| C | Vertical (single in style 9) | `0xB3` │ |
+| D | Vertical, right side (double in style 9) | `0xBA` ║ |
+| E | Upper-left outer corner (outside) / Up-to-right outer corner (inside) | `0xD5` ╒ |
+| F | Upper-right outer corner (outside) / Right-to-down outer corner (inside) | `0xBB` ╗ |
+| G | Up-to-right inner corner (outside) / Upper-left inner corner (inside) | `0xD6` ╓ |
+| H | Right-to-down inner corner (outside) / Upper-right inner corner (inside) | `0xBF` ┐ |
+| I | Lower-left inner corner (inside) | `0xC8` ╚ |
+| J | Lower-right inner corner (inside) | `0xBE` ╛ |
+| K | Lower-left outer corner (outside) | `0xC0` └ |
+| L | Lower-right outer corner (outside) | `0xBD` ╜ |
+| M | Not described by Roy/SAC (right-hand tee piece) | `0xB5` ╡ |
+| N | Not described by Roy/SAC (left-hand tee piece) | `0xC7` ╟ |
+| O | Hard space: opaque blank inside a glyph | blank (editor shows `0xF7` ≈) |
+| `@` | Filler for leading spaces | blank / transparent |
+| `&` | Descender marker | — |
+
+### Outline style table
+
+CP437 codes for placeholders `A`…`N` (`O`, `P`, `Q` = `0x20` in every
+style). Styles 0–15 enumerate single/double lines: bit 0 makes `A` double,
+bit 1 `B`, bit 2 `C`, bit 3 `D`. Styles 16–18 use block elements.
+
+| Style | A | B | C | D | E | F | G | H | I | J | K | L | M | N |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | C4 | C4 | B3 | B3 | DA | BF | DA | BF | C0 | D9 | C0 | D9 | B4 | C3 |
+| 1 | CD | C4 | B3 | B3 | D5 | B8 | DA | BF | D4 | BE | C0 | D9 | B5 | C3 |
+| 2 | C4 | CD | B3 | B3 | DA | BF | D5 | B8 | C0 | D9 | D4 | BE | B4 | C6 |
+| 3 | CD | CD | B3 | B3 | D5 | B8 | D5 | B8 | D4 | BE | D4 | BE | B5 | C6 |
+| 4 | C4 | C4 | BA | B3 | D6 | BF | DA | B7 | C0 | BD | D3 | D9 | B6 | C3 |
+| 5 | CD | C4 | BA | B3 | C9 | B8 | DA | B7 | D4 | BC | D3 | D9 | B9 | C3 |
+| 6 | C4 | CD | BA | B3 | D6 | BF | D5 | BB | C0 | BD | C8 | BE | B6 | C6 |
+| 7 | CD | CD | BA | B3 | C9 | B8 | D5 | BB | D4 | BC | C8 | BE | B9 | C6 |
+| 8 | C4 | C4 | B3 | BA | DA | B7 | D6 | BF | D3 | D9 | C0 | BD | B4 | C7 |
+| 9 | CD | C4 | B3 | BA | D5 | BB | D6 | BF | C8 | BE | C0 | BD | B5 | C7 |
+| 10 | C4 | CD | B3 | BA | DA | B7 | C9 | B8 | D3 | D9 | D4 | BC | B4 | CC |
+| 11 | CD | CD | B3 | BA | D5 | BB | C9 | B8 | C8 | BE | D4 | BC | B5 | CC |
+| 12 | C4 | C4 | BA | BA | D6 | B7 | D6 | B7 | D3 | BD | D3 | BD | B6 | C7 |
+| 13 | CD | C4 | BA | BA | C9 | BB | D6 | B7 | C8 | BC | D3 | BD | B9 | C7 |
+| 14 | C4 | CD | BA | BA | D6 | B7 | C9 | BB | D3 | BD | C8 | BC | B6 | CC |
+| 15 | CD | CD | BA | BA | C9 | BB | C9 | BB | C8 | BC | C8 | BC | B9 | CC |
+| 16 | DC | DC | DB | DB | DC | DC | DC | DC | DB | DB | DB | DB | DB | DB |
+| 17 | DF | DF | DB | DB | DB | DB | DB | DB | DF | DF | DF | DF | DB | DB |
+| 18 | DF | DC | DE | DD | DE | DD | DC | DC | DF | DF | DE | DD | DB | DB |
+
+Style 9 is byte-for-byte Roy/SAC's letter table, which independently
+confirms the table.
+
+The editor's drawing rules (double lines form the outermost/right-hand edge
+of a column and the top edge of a beam) are enforced by TDFONTS.EXE, not by
+the file format.
+
+## Palette
+
+| Index | Color | Index | Color |
+|---|---|---|---|
+| 0 | Black | 8 | Dark Gray |
+| 1 | Blue | 9 | Bright Blue |
+| 2 | Green | 10 | Bright Green |
+| 3 | Cyan | 11 | Bright Cyan |
+| 4 | Red | 12 | Bright Red |
+| 5 | Magenta | 13 | Bright Magenta |
+| 6 | Brown | 14 | Yellow |
+| 7 | Light Gray | 15 | White |
+
+## Limits
+
+- **65,535 bytes of character data per font** (16-bit BlockSize); glyph
+  offsets can be at most `0xFFFE` because `0xFFFF` means "undefined". A full
+  94-glyph color font at 30×12 does not fit; sharing offsets is the
+  workaround.
+- Glyphs: 30 wide, 12 high plus descender lines.
+- 34 fonts per file (editor limit).
+
+## Errata against the Roy/SAC write-up
+
+1. **Header sizes.** Roy/SAC states an empty file is 232 bytes and that each
+   font adds 212 bytes. His own offset table (bytes 20…232, data at 233)
+   gives a **213-byte** font header and a **233-byte** single-font file.
+2. **Next-font formula.** "Font 2 header = 232 + BlockSize + 1" equals
+   `233 + BlockSize`: no separator byte exists outside the block. The NUL
+   that "terminates" a non-final font is the last byte *inside* its block.
+3. **Glyph terminator.** "Each line ends with 0Dh; the character ends with
+   00h" suggests `… 0D 00`; TDFONTS.EXE writes the NUL directly after the
+   last cell. Both must be accepted.
+4. **`&` in color fonts** is a single byte (no attribute) — not stated by
+   Roy/SAC; confirmed by de-facto readers.
+5. **Hard space `O`** is listed as `0xF7`; that is only the editor's
+   visualisation. TheDraw displays it as a blank in every outline style.
+6. **Attribute bit 7** (blink) is not mentioned; Roy/SAC describes the high
+   nibble as background `0..7`.
 
 ## SwiftTDF compliance posture
 
-SwiftTDF treats this document as the source of truth. Where the spec is ambiguous, the library:
-
-- Reads liberally: any encoding the original TDFONTS.EXE accepted should round-trip cleanly.
-- Writes conservatively: produces output that the original TDFONTS.EXE editor accepts without complaint.
-- Preserves shared offsets when glyph data is byte-identical (matches the "Copy character" optimization).
-- Distinguishes color-attribute `0x00` from the NUL terminator structurally (by position, after 0x0D), never by byte value alone.
+- Reads liberally: both terminator forms, a 0x00 spacing byte (as 0), name
+  lengths above 12 (clamped), a missing final glyph terminator, a separator
+  NUL outside the block size, a `0x00` font-list terminator and a trailing
+  SAUCE record.
+- Writes what TDFONTS.EXE writes: back-to-back fonts with the in-block NUL,
+  bare-NUL glyph terminators, shared offsets for byte-identical glyphs.
+- Treats every offset and size as untrusted and throws `TDFError` instead
+  of trapping.
