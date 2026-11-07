@@ -18,6 +18,10 @@ public struct TDFLine: Sendable, Hashable, Codable {
     public var isDescender: Bool
 
     /// Memberwise initializer.
+    ///
+    /// - Parameters:
+    ///   - cells: Cells in left-to-right order.
+    ///   - isDescender: Whether the line is a descender line.
     public init(cells: [TDFCell] = [], isDescender: Bool = false) {
         self.cells = cells
         self.isDescender = isDescender
@@ -55,6 +59,11 @@ public struct TDFCharacter: Sendable, Hashable, Codable {
     public var lines: [TDFLine]
 
     /// Memberwise initializer.
+    ///
+    /// - Parameters:
+    ///   - maxWidth: Declared width in cells (`1...30`).
+    ///   - maxHeight: Declared height in lines, excluding descenders (`1...12`).
+    ///   - lines: Glyph content, top to bottom.
     public init(maxWidth: UInt8, maxHeight: UInt8, lines: [TDFLine] = []) {
         self.maxWidth = maxWidth
         self.maxHeight = maxHeight

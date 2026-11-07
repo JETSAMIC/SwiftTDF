@@ -1,45 +1,35 @@
 // TDFFontCollection.swift
 // SwiftTDF — file-level model: a collection of up to 34 TDF fonts.
 
-/// A TheDraw font file: zero or more ``TDFFont`` entries plus the on-disk
-/// invariants needed by the parser/writer.
+/// A TheDraw font file: an ordered collection of ``TDFFont`` values plus the
+/// on-disk constants used by the parser and writer.
 ///
-/// ## On-disk layout (per Roy/SAC, see `Reference/TDF_SPECIFICATION.md`)
-///
-/// An **empty** `.tdf` file is exactly **232 bytes**:
+/// ## On-disk layout (see `Reference/TDF_SPECIFICATION.md`)
 ///
 /// ```
-///   offsets 0..19   (20 bytes)  file header  — see fileSignature
-///   offsets 20..23  ( 4 bytes)  font-1 start-of-font sentinel
-///   offsets 24..231 (208 bytes) font-1 placeholder metadata
+///   0     20 bytes   file header  0x13 "TheDraw FONTS file" 0x1A
+///   20    213 bytes  font 1 header (sentinel … 94-entry offset table)
+///   233   N1 bytes   font 1 character data (N1 = font 1 block size)
+///   233+N1           font 2 header, and so on
 /// ```
 ///
-/// The per-font header is exposed as ``fontHeaderSize`` = **212 bytes**. This
-/// figure follows Roy/SAC's accounting:
+/// Each font header is **213 bytes**: 4 sentinel, 1 name length, 12 name,
+/// 4 reserved, 1 type, 1 spacing, 2 block size and 188 offset-table bytes.
+/// A file holding one empty font is therefore 233 bytes. Roy/SAC's write-up quotes 232
+/// and 212; those figures are off by one against his own offset table.
 ///
-/// ```
-///   4-byte sentinel + 1-byte name length + 12-byte name + 4 reserved
-///   + 1 type + 1 spacing + 2 block-size + 188 (94 × 2) offsets = 213
-/// ```
-///
-/// 213 is the raw sum, but the spec quotes 212 because the inter-font
-/// **separator** in multi-font collections (NUL between font N's data and
-/// font N+1's sentinel) is accounted for once outside the per-font header.
-/// We mirror the spec's number here and let the writer reconcile the
-/// boundary bytes explicitly. The empty-file invariant (`20 + 212 == 232`)
-/// is verified by tests.
-///
-/// ## Multi-font separator
-///
-/// Fonts in the collection are NUL-separated **except** the last font, which
-/// is not NUL-terminated.
-public struct TDFFontCollection: Sendable, Codable {
+/// Every font but the last carries one extra `0x00` at the end of its
+/// character data, *counted in its block size*. A `0x00` byte where a font
+/// header would start ends the font list.
+public struct TDFFontCollection: Sendable, Hashable, Codable {
     /// Fonts in this collection, in file order. Spec maximum is 34
     /// (``maxFontsPerCollection``); not enforced at the type level so that
     /// editors can hold over-capacity collections during editing.
     public var fonts: [TDFFont]
 
     /// Memberwise initializer.
+    ///
+    /// - Parameter fonts: Fonts in file order.
     public init(fonts: [TDFFont] = []) {
         self.fonts = fonts
     }
@@ -66,7 +56,7 @@ public struct TDFFontCollection: Sendable, Codable {
     /// Size of the file header in bytes (offsets 0..19).
     public static let fileHeaderSize = 20
 
-    /// Size of one per-font header in bytes, per Roy/SAC's accounting.
-    /// See the type documentation for the byte-by-byte breakdown.
-    public static let fontHeaderSize = 212
+    /// Size of one per-font header in bytes (213): sentinel through the
+    /// end of the 94-entry offset table. See the type documentation.
+    public static let fontHeaderSize = 213
 }
