@@ -60,3 +60,9 @@ fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/**/*.png
 fastlane/test_output
+
+# Swift Package Manager / Xcode build products (JETSAMIC standard)
+.swiftpm/
+*.xcodeproj
+DerivedData/
+.DS_Store
