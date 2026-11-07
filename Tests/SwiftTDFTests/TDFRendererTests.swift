@@ -21,6 +21,13 @@ final class TDFRendererTests: XCTestCase {
     }
 
     /// An outline cell containing 'O' (0x4F) must set isHardSpace=true.
+    ///
+    /// Changed during the production audit: this test used to expect CP437
+    /// 0xF7 ('≈'). That is only how the TDFONTS.EXE *editor* visualises a
+    /// hard space (Roy/SAC's table, still exposed as
+    /// `TDFOutlineGlyphs.render`). TheDraw's display renderer — and every
+    /// one of its 19 outline styles — draws the hard space as an opaque
+    /// blank, which is what `TDFRenderer` now produces.
     func testOutlineCellLetterOIsHardSpace() {
         let glyph = TDFCharacter(
             maxWidth: 1, maxHeight: 1,
@@ -28,7 +35,7 @@ final class TDFRendererTests: XCTestCase {
         )
         let grid = TDFRenderer.render(glyph, type: .outline)
         let cell = grid.first?.first
-        XCTAssertEqual(cell?.code, 0xF7, "O should translate to CP437 0xF7")
+        XCTAssertEqual(cell?.code, 0x20, "O renders as an opaque blank")
         XCTAssertEqual(cell?.isHardSpace, true)
         XCTAssertEqual(cell?.isFiller, false)
     }

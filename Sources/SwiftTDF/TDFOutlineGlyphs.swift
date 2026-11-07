@@ -1,15 +1,20 @@
 // TDFOutlineGlyphs.swift
-// SwiftTDF — outline-font letter-code → CP437 mapping.
+// SwiftTDF — outline-font placeholder letters and TheDraw's outline styles.
 
-/// Maps the single-byte "letter codes" used inside outline-font glyph
-/// data to the CP437 code points they should render as. Per the TDF
-/// spec, outline fonts store letters A..N (etc.) rather than the
-/// actual box-drawing characters; the renderer must translate.
+/// The placeholder-letter table for outline fonts as published by Roy/SAC.
 ///
-/// Letters not in this table render as the literal byte (TDF allows
-/// arbitrary text characters in outline glyphs alongside the box-draw
-/// letters).
+/// Outline fonts store the letters `A`…`N` (plus a few special letters)
+/// rather than box-drawing characters. This type exposes Roy/SAC's
+/// reference table, which is what the TDFONTS.EXE editor shows while you
+/// draw an outline glyph: letters `A`…`N` map to the same CP437 bytes as
+/// outline style 9 (``TDFOutlineStyle/roySAC``) and `O` (hard space) is
+/// shown as `≈` (`0xF7`).
+///
+/// For *display* rendering use ``TDFOutlineStyle/substitute(_:)`` (or
+/// ``TDFRenderer``), which applies the style the user selected and renders
+/// the hard space as a blank, as TheDraw does.
 public enum TDFOutlineGlyphs {
+    /// Roy/SAC's placeholder letter → CP437 table (editor view).
     public static let mapping: [UInt8: UInt8] = [
         0x41: 0xCD,  // A → ═
         0x42: 0xC4,  // B → ─
@@ -25,23 +30,110 @@ public enum TDFOutlineGlyphs {
         0x4C: 0xBD,  // L → ╜
         0x4D: 0xB5,  // M → ╡
         0x4E: 0xC7,  // N → ╟
-        0x4F: 0xF7,  // O → ≈ (hard space inside character)
+        0x4F: 0xF7,  // O → ≈ (hard space, as shown by the editor)
     ]
 
-    /// Returns the rendered CP437 byte for an outline-glyph cell.
-    /// Letters with no mapping are returned as-is so text-style
-    /// glyphs in outline fonts still render reasonably.
+    /// Returns the CP437 byte Roy/SAC's table assigns to an outline cell.
+    ///
+    /// - Parameter letter: The placeholder byte stored in the glyph.
+    /// - Returns: The mapped CP437 byte, or `letter` unchanged when it has no
+    ///   mapping (outline glyphs may contain literal characters).
     public static func render(_ letter: UInt8) -> UInt8 {
         mapping[letter] ?? letter
     }
 
-    /// True if the byte is a filler for leading spaces — the renderer
-    /// should treat these as transparent (don't paint).
+    /// Returns `true` if the byte is the outline-font leading-space filler
+    /// `@` (`0x40`). Renderers treat filler cells as transparent.
+    ///
+    /// - Parameter byte: A cell code from an outline glyph.
     public static func isFiller(_ byte: UInt8) -> Bool { byte == 0x40 }
 
-    /// True if the byte is a descender marker. Should never appear
-    /// in normalized TDFCharacter.lines after parsing (the parser
-    /// strips it and sets line.isDescender), but exposed for
-    /// completeness if downstream code is round-tripping raw bytes.
-    public static func isDescender(_ byte: UInt8) -> Bool { byte == 0x26 }
+    /// Returns `true` if the byte is the `&` (`0x26`) marker.
+    ///
+    /// The parser folds a trailing `&` into ``TDFLine/isDescender``; this is
+    /// exposed for code that handles raw glyph bytes.
+    ///
+    /// - Parameter byte: A raw glyph byte.
+    public static func isDescender(_ byte: UInt8) -> Bool { byte == TDFCell.markerCode }
+}
+
+/// One of TheDraw's 19 outline styles.
+///
+/// TheDraw lets the user pick how an outline font is drawn when stamping
+/// text. The font stores placeholder letters `A`…`Q`; the selected style
+/// substitutes each with a CP437 character. Styles 0–15 are every
+/// combination of single/double lines for the four line placeholders
+/// (`A`, `B` horizontal; `C`, `D` vertical); styles 16–18 use half and full
+/// blocks. Letters `O`, `P` and `Q` are blanks in every style (`O` is the
+/// "hard space" that fills a glyph's interior).
+///
+/// The table was taken from TheDraw by the icy_tools / retrofont project
+/// (Mike Krüger) and cross-checks exactly against Roy/SAC's published
+/// letter table, which equals style 9 (``roySAC``).
+public struct TDFOutlineStyle: Sendable, Hashable {
+    /// Style index, `0...18`.
+    public let index: Int
+
+    /// Creates an outline style.
+    ///
+    /// - Parameter index: Style index in `0...18`.
+    /// - Returns: `nil` when `index` is out of range.
+    public init?(index: Int) {
+        guard Self.table.indices.contains(index) else { return nil }
+        self.index = index
+    }
+
+    private init(unchecked index: Int) {
+        self.index = index
+    }
+
+    /// Number of outline styles TheDraw offers (19).
+    public static let count = 19
+
+    /// All 19 styles in index order.
+    public static let all: [TDFOutlineStyle] = (0..<count).map { TDFOutlineStyle(unchecked: $0) }
+
+    /// Style 9: double horizontal tops, double right-hand verticals — the
+    /// mapping published by Roy/SAC. This is the library default.
+    public static let roySAC = TDFOutlineStyle(unchecked: 9)
+
+    /// Substitutes one outline cell for display.
+    ///
+    /// - Parameter letter: The placeholder byte stored in the glyph.
+    /// - Returns: The CP437 byte to draw. `A`…`Q` are looked up in this
+    ///   style's table (`O`, `P`, `Q` give a blank `0x20`); `@` gives a
+    ///   blank; every other byte is returned unchanged.
+    public func substitute(_ letter: UInt8) -> UInt8 {
+        switch letter {
+        case 0x41...0x51:
+            return Self.table[index][Int(letter - 0x41)]
+        case 0x40:
+            return 0x20
+        default:
+            return letter
+        }
+    }
+
+    /// CP437 bytes for placeholders `A`…`Q`, one row per style.
+    static let table: [[UInt8]] = [
+        [0xC4, 0xC4, 0xB3, 0xB3, 0xDA, 0xBF, 0xDA, 0xBF, 0xC0, 0xD9, 0xC0, 0xD9, 0xB4, 0xC3, 0x20, 0x20, 0x20],  // 0
+        [0xCD, 0xC4, 0xB3, 0xB3, 0xD5, 0xB8, 0xDA, 0xBF, 0xD4, 0xBE, 0xC0, 0xD9, 0xB5, 0xC3, 0x20, 0x20, 0x20],  // 1
+        [0xC4, 0xCD, 0xB3, 0xB3, 0xDA, 0xBF, 0xD5, 0xB8, 0xC0, 0xD9, 0xD4, 0xBE, 0xB4, 0xC6, 0x20, 0x20, 0x20],  // 2
+        [0xCD, 0xCD, 0xB3, 0xB3, 0xD5, 0xB8, 0xD5, 0xB8, 0xD4, 0xBE, 0xD4, 0xBE, 0xB5, 0xC6, 0x20, 0x20, 0x20],  // 3
+        [0xC4, 0xC4, 0xBA, 0xB3, 0xD6, 0xBF, 0xDA, 0xB7, 0xC0, 0xBD, 0xD3, 0xD9, 0xB6, 0xC3, 0x20, 0x20, 0x20],  // 4
+        [0xCD, 0xC4, 0xBA, 0xB3, 0xC9, 0xB8, 0xDA, 0xB7, 0xD4, 0xBC, 0xD3, 0xD9, 0xB9, 0xC3, 0x20, 0x20, 0x20],  // 5
+        [0xC4, 0xCD, 0xBA, 0xB3, 0xD6, 0xBF, 0xD5, 0xBB, 0xC0, 0xBD, 0xC8, 0xBE, 0xB6, 0xC6, 0x20, 0x20, 0x20],  // 6
+        [0xCD, 0xCD, 0xBA, 0xB3, 0xC9, 0xB8, 0xD5, 0xBB, 0xD4, 0xBC, 0xC8, 0xBE, 0xB9, 0xC6, 0x20, 0x20, 0x20],  // 7
+        [0xC4, 0xC4, 0xB3, 0xBA, 0xDA, 0xB7, 0xD6, 0xBF, 0xD3, 0xD9, 0xC0, 0xBD, 0xB4, 0xC7, 0x20, 0x20, 0x20],  // 8
+        [0xCD, 0xC4, 0xB3, 0xBA, 0xD5, 0xBB, 0xD6, 0xBF, 0xC8, 0xBE, 0xC0, 0xBD, 0xB5, 0xC7, 0x20, 0x20, 0x20],  // 9
+        [0xC4, 0xCD, 0xB3, 0xBA, 0xDA, 0xB7, 0xC9, 0xB8, 0xD3, 0xD9, 0xD4, 0xBC, 0xB4, 0xCC, 0x20, 0x20, 0x20],  // 10
+        [0xCD, 0xCD, 0xB3, 0xBA, 0xD5, 0xBB, 0xC9, 0xB8, 0xC8, 0xBE, 0xD4, 0xBC, 0xB5, 0xCC, 0x20, 0x20, 0x20],  // 11
+        [0xC4, 0xC4, 0xBA, 0xBA, 0xD6, 0xB7, 0xD6, 0xB7, 0xD3, 0xBD, 0xD3, 0xBD, 0xB6, 0xC7, 0x20, 0x20, 0x20],  // 12
+        [0xCD, 0xC4, 0xBA, 0xBA, 0xC9, 0xBB, 0xD6, 0xB7, 0xC8, 0xBC, 0xD3, 0xBD, 0xB9, 0xC7, 0x20, 0x20, 0x20],  // 13
+        [0xC4, 0xCD, 0xBA, 0xBA, 0xD6, 0xB7, 0xC9, 0xBB, 0xD3, 0xBD, 0xC8, 0xBC, 0xB6, 0xCC, 0x20, 0x20, 0x20],  // 14
+        [0xCD, 0xCD, 0xBA, 0xBA, 0xC9, 0xBB, 0xC9, 0xBB, 0xC8, 0xBC, 0xC8, 0xBC, 0xB9, 0xCC, 0x20, 0x20, 0x20],  // 15
+        [0xDC, 0xDC, 0xDB, 0xDB, 0xDC, 0xDC, 0xDC, 0xDC, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0x20, 0x20, 0x20],  // 16
+        [0xDF, 0xDF, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDF, 0xDF, 0xDF, 0xDF, 0xDB, 0xDB, 0x20, 0x20, 0x20],  // 17
+        [0xDF, 0xDC, 0xDE, 0xDD, 0xDE, 0xDD, 0xDC, 0xDC, 0xDF, 0xDF, 0xDE, 0xDD, 0xDB, 0xDB, 0x20, 0x20, 0x20],  // 18
+    ]
 }
