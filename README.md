@@ -114,9 +114,10 @@ or byte offset involved. The parser never traps on malformed input.
 
 The format reference ships with the repository:
 [Reference/TDF-Format.md](Reference/TDF-Format.md). It
-documents where the published Roy/SAC write-up is wrong (header sizes,
-multi-font layout, glyph terminator, `&` in color fonts) and how SwiftTDF
-behaves in each case.
+covers every byte of the format, the outline placeholder roles and all 19
+outline styles, documents where the published Roy/SAC write-up is wrong
+(header sizes, multi-font layout, glyph terminator, `&` in color fonts) and
+maps each feature to SwiftTDF's support.
 
 ## Credits
 

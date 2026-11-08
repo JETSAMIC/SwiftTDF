@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TDFAttribute.blink` (attribute bit 7).
 - Typed errors for out-of-range glyph offsets, oversized glyphs and
   unencodable writer input.
+- Format reference `Reference/TDF-Format.md` (byte layouts, outline
+  placeholder roles and style table, algorithms, errata).
 - DocC catalog, Swift Package Index configuration and CI workflow.
 - Support for tvOS 17, watchOS 10 and visionOS 1 alongside iOS 17 and
   macOS 14.
