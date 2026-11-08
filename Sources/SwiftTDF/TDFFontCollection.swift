@@ -4,7 +4,7 @@
 /// A TheDraw font file: an ordered collection of ``TDFFont`` values plus the
 /// on-disk constants used by the parser and writer.
 ///
-/// ## On-disk layout (see `Reference/TDF_SPECIFICATION.md`)
+/// ## On-disk layout (see `Reference/TDF-Format.md`)
 ///
 /// ```
 ///   0     20 bytes   file header  0x13 "TheDraw FONTS file" 0x1A

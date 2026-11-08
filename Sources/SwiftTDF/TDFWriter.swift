@@ -2,7 +2,7 @@
 // SwiftTDF — encode a ``TDFFontCollection`` into the raw `.tdf` binary
 // container.
 //
-// See Reference/TDF_SPECIFICATION.md for the authoritative format reference.
+// See Reference/TDF-Format.md for the authoritative format reference.
 // Writes conservatively (output that TDFONTS.EXE accepts without complaint)
 // and round-trips cleanly through ``TDFParser/parse(_:)`` modulo unspecified
 // padding bytes (e.g. the font-name buffer past the declared length).

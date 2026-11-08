@@ -1,7 +1,7 @@
 // TDFParser.swift
 // SwiftTDF — decode raw .tdf bytes into a ``TDFFontCollection``.
 //
-// See Reference/TDF_SPECIFICATION.md for the format reference. Reads
+// See Reference/TDF-Format.md for the format reference. Reads
 // liberally (accepts anything TDFONTS.EXE would have produced, plus the
 // common variants written by other tools) and treats every offset and size
 // in the file as untrusted.

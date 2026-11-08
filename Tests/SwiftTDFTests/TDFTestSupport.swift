@@ -1,6 +1,6 @@
 // TDFTestSupport.swift
 // SwiftTDF — hand-built byte fixtures shared by the spec and robustness
-// tests. Everything here is derived from Reference/TDF_SPECIFICATION.md,
+// tests. Everything here is derived from Reference/TDF-Format.md,
 // not from the writer, so the parser is checked against the spec itself.
 
 import Foundation

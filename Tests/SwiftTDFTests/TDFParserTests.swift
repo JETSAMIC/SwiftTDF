@@ -11,7 +11,7 @@ final class TDFParserTests: XCTestCase {
 
     /// Parsing the writer's output for an empty collection should yield an
     /// empty collection back. This is the canonical round-trip identity for
-    /// the empty-file case described in `Reference/TDF_SPECIFICATION.md`.
+    /// the empty-file case described in `Reference/TDF-Format.md`.
     func testEmptyCollectionRoundTrip() throws {
         let encoded = try TDFWriter.encode(.empty)
         let parsed = try TDFParser.parse(encoded)

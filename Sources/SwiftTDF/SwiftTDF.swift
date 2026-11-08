@@ -1,6 +1,6 @@
 // SwiftTDF — TheDraw Font (.TDF) reader, writer, and renderer.
 //
-// See Reference/TDF_SPECIFICATION.md for the format reference.
+// See Reference/TDF-Format.md for the format reference.
 
 /// Namespace for library-wide metadata.
 public enum SwiftTDF {
