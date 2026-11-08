@@ -282,6 +282,62 @@ final class TDFSpecConformanceTests: XCTestCase {
         }
     }
 
+    /// TDF-Format.md §4.4/§4.5: in styles 0–15, bit 0 doubles `A` (top
+    /// edges), bit 1 `B` (bottom), bit 2 `C` (left), bit 3 `D` (right), and
+    /// every corner/tee is the box-drawing join of its two edge letters.
+    func testLineStylesFollowEdgeCompositionRule() {
+        // Box-drawing joins indexed by [horizontal double] + 2 × [vertical double].
+        let topLeft: [UInt8] = [0xDA, 0xD5, 0xD6, 0xC9]      // ┌ ╒ ╓ ╔
+        let topRight: [UInt8] = [0xBF, 0xB8, 0xB7, 0xBB]     // ┐ ╕ ╖ ╗
+        let bottomLeft: [UInt8] = [0xC0, 0xD4, 0xD3, 0xC8]   // └ ╘ ╙ ╚
+        let bottomRight: [UInt8] = [0xD9, 0xBE, 0xBD, 0xBC]  // ┘ ╛ ╜ ╝
+        let rightTee: [UInt8] = [0xB4, 0xB5, 0xB6, 0xB9]     // ┤ ╡ ╢ ╣
+        let leftTee: [UInt8] = [0xC3, 0xC6, 0xC7, 0xCC]      // ├ ╞ ╟ ╠
+        // Placeholder → (join table, horizontal edge, vertical edge).
+        let joins: [(UInt8, [UInt8], Int, Int)] = [
+            (0x45, topLeft, 0, 2),      // E = A + C
+            (0x46, topRight, 0, 3),     // F = A + D
+            (0x47, topLeft, 1, 3),      // G = B + D
+            (0x48, topRight, 1, 2),     // H = B + C
+            (0x49, bottomLeft, 0, 3),   // I = A + D
+            (0x4A, bottomRight, 0, 2),  // J = A + C
+            (0x4B, bottomLeft, 1, 2),   // K = B + C
+            (0x4C, bottomRight, 1, 3),  // L = B + D
+            (0x4D, rightTee, 0, 2),     // M = A + C
+            (0x4E, leftTee, 1, 3),      // N = B + D
+        ]
+        for index in 0..<16 {
+            let style = TDFOutlineStyle(index: index)!
+            let double = (0..<4).map { (index >> $0) & 1 }
+            XCTAssertEqual(style.substitute(0x41), double[0] == 1 ? 0xCD : 0xC4, "style \(index) A")
+            XCTAssertEqual(style.substitute(0x42), double[1] == 1 ? 0xCD : 0xC4, "style \(index) B")
+            XCTAssertEqual(style.substitute(0x43), double[2] == 1 ? 0xBA : 0xB3, "style \(index) C")
+            XCTAssertEqual(style.substitute(0x44), double[3] == 1 ? 0xBA : 0xB3, "style \(index) D")
+            for (letter, table, horizontal, vertical) in joins {
+                XCTAssertEqual(
+                    style.substitute(letter),
+                    table[double[horizontal] + 2 * double[vertical]],
+                    "style \(index) letter \(UnicodeScalar(letter))"
+                )
+            }
+        }
+    }
+
+    /// TDF-Format.md §4.5: the three block styles, `A`…`N`.
+    func testBlockStylesMatchSpecTable() {
+        let expected: [Int: [UInt8]] = [
+            16: [0xDC, 0xDC, 0xDB, 0xDB, 0xDC, 0xDC, 0xDC, 0xDC, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB],
+            17: [0xDF, 0xDF, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDB, 0xDF, 0xDF, 0xDF, 0xDF, 0xDB, 0xDB],
+            18: [0xDF, 0xDC, 0xDE, 0xDD, 0xDE, 0xDD, 0xDC, 0xDC, 0xDF, 0xDF, 0xDE, 0xDD, 0xDB, 0xDB],
+        ]
+        for (index, row) in expected {
+            let style = TDFOutlineStyle(index: index)!
+            for (offset, code) in row.enumerated() {
+                XCTAssertEqual(style.substitute(0x41 + UInt8(offset)), code, "style \(index) column \(offset)")
+            }
+        }
+    }
+
     func testOutlineRendererUsesSelectedStyle() {
         let glyph = TDFCharacter(maxWidth: 3, maxHeight: 1, lines: [
             TDFLine(cells: [TDFCell(code: 0x40), TDFCell(code: 0x41), TDFCell(code: 0x4F)]),
